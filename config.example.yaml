@@ -1,0 +1,100 @@
+# ============================================
+# 飞书自动回复 - 配置示例
+# ============================================
+# 使用方式：
+#   1. 把本文件复制为 config.yaml
+#   2. 填入你自己的飞书地址、会话名、API Key
+#
+# 或者不落盘密钥（推荐），改用环境变量：
+#   FEISHU_BASE_URL / FEISHU_TARGET_CHAT / LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+# ============================================
+
+# 飞书网页版地址
+# 从浏览器地址栏复制，形如 https://<你的租户>.feishu.cn/next/messenger/
+feishu:
+  base_url: "https://YOUR_TENANT.feishu.cn/next/messenger/"
+  # 目标会话名称（左侧列表里显示的名字）
+  target_chat_name: "AI教学平台"
+
+# 浏览器设置
+browser:
+  # 浏览器通道：msedge = 微软 Edge / chrome = 谷歌 Chrome
+  # 留空则使用 Playwright 自带 Chromium（需先 playwright install chromium）
+  channel: "msedge"
+  # 用户数据目录：登录态会保存在这里，登录一次后可长期复用
+  user_data_dir: "./.browser_data"
+  # 是否显示浏览器窗口（强烈建议 true，飞书对无头浏览器风控严格）
+  headless: false
+  # 慢动作（毫秒），方便观察每一步，调试用
+  slow_mo: 200
+  # 窗口大小
+  viewport_width: 1440
+  viewport_height: 900
+
+# 轮询设置
+polling:
+  # 每轮检查间隔（秒）
+  interval: 5
+  # 随机抖动范围（秒），避免固定频率触发风控
+  jitter: 2
+
+# 上下文设置（关键：让 AI 看到题目原文和对话历史）
+context:
+  # 发送给 AI 的上下文消息条数上限（含触发消息本身）
+  context_size: 30
+  # 上下文最大字符数（控制 token 开支，超出则从最早的丢弃）
+  max_chars: 3000
+
+# 回复策略
+reply_strategy:
+  # 只答最新一题（true=推荐）：
+  #   机器人推了新题才回复；程序启动时的历史积压旧题一律跳过，不补答。
+  #   false：从最新往回依次补答所有未答的题（会连续发很多条，慎用）。
+  latest_only: true
+
+# 大模型设置（示例为硅基流动 SiliconFlow，兼容 OpenAI 格式）
+llm:
+  provider: "siliconflow"
+  base_url: "https://api.siliconflow.cn/v1"
+  # ★ 填入你自己的 API Key（或改用环境变量 LLM_API_KEY）
+  api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # 可用模型（以硅基流动为例）：
+  #   Qwen/Qwen3.5-35B-A3B           理解力强、响应快（关闭思考模式后 ~1s）
+  #   Qwen/Qwen2.5-72B-Instruct-128K 备选：更强的传统指令模型
+  #   deepseek-ai/DeepSeek-V3        备选：能力均衡
+  model: "Qwen/Qwen3.5-35B-A3B"
+  # 关闭思考模式（Qwen3.5 等思考型模型必开，否则又慢又费 token）
+  enable_thinking: false
+  system_prompt: |
+    你是答题助手，替学生回复「AI教学平台」教学机器人。
+
+    我会把我和机器人的最近对话粘贴给你。请根据对话，判断学生下一条应该发送什么。
+
+    【判断规则】
+    - 对话中最后一条是机器人消息。要根据它判断该回什么。
+    - 「AI 自适应问答」+ 题目（可能带 A/B/C/D 选项）→ 这是正式题目，给出答案。
+    - 「学习反馈」+「答对了」→ 说明答对了，按其中的新要求作答（如"说说...""解释..."）。
+    - 「学习反馈」+「答错了」+ 追问 → 针对追问给出正确答案，不要重复老答案。
+    - 「学习提醒」+「你已经XX小时没有答题」→ 这是催答题的提醒，
+      里面的"直接回复课程名（如智能合约）"只是示例，**不要回复课程名**，
+      应回复当前正在学习的课程名以继续答题（如正在学习智能合约技术就回"智能合约技术"）。
+
+    【输出格式】
+    - 选择题：只输出选项字母（如 C）
+    - 判断题：输出「正确」或「错误」
+    - 简答题：用一两句话准确作答
+    - 只输出要发送的内容本身，不要解释、不要客套、不要复述题目。
+  max_tokens: 1000
+  temperature: 0.3
+  # 单次请求超时（秒）。接口偶发慢，45 秒较合适
+  timeout: 45
+  # 失败最大重试次数
+  max_retries: 3
+
+# 发送设置
+reply:
+  # 发送前等待的随机延迟（秒），让它看起来更自然
+  send_delay_min: 2
+  send_delay_max: 6
+  # 同一道题只回答一次，避免重复回复
+  dedup: true
