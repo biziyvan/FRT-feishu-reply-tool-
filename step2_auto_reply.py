@@ -25,10 +25,13 @@
 import sys
 import json
 import time
+import os
+import io
 import random
 import logging
 import signal
 import argparse
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -49,7 +52,9 @@ from denoise import (
 )
 
 
-BASE_DIR = Path(__file__).parent
+from runtime import DATA_DIR
+
+BASE_DIR = DATA_DIR
 STATE_FILE = BASE_DIR / "answered.json"
 HISTORY_FILE = BASE_DIR / "history.json"
 LOG_FILE = BASE_DIR / "auto_reply.log"
@@ -87,11 +92,66 @@ if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
     _fh = logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8")
     _fh.setFormatter(_fmt)
     logger.addHandler(_fh)
+
+# 打包运行时，GUI 通过「实时日志文件」读取输出（窗口程序无 stdout）
+_LIVE_LOG = os.environ.get("FEISHU_LIVE_LOG")
+if _LIVE_LOG and not any(
+    isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == _LIVE_LOG
+    for h in logger.handlers
+):
+    try:
+        _lh = logging.FileHandler(_LIVE_LOG, mode="a", encoding="utf-8")
+        _lh.setFormatter(_fmt)
+        logger.addHandler(_lh)
+    except Exception:
+        pass
+
 if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
            for h in logger.handlers):
-    _sh = logging.StreamHandler(sys.stdout)
-    _sh.setFormatter(_fmt)
-    logger.addHandler(_sh)
+    # 关键：打包成窗口程序后，stdout 可能是 None，或是 GBK 编码的控制台代理。
+    # 日志里含 Emoji（📚✅💡），用 GBK 编码会直接抛 UnicodeEncodeError，
+    # 因此统一包一层 UTF-8 + 容错的输出流。
+    try:
+        _raw_out = sys.stdout if sys.stdout is not None else open(os.devnull, "w")
+    except Exception:
+        _raw_out = open(os.devnull, "w")
+
+    try:
+        _safe_out = io.TextIOWrapper(
+            _raw_out.buffer, encoding="utf-8", errors="replace", line_buffering=True
+        )
+    except Exception:
+        # 没有 .buffer（如已被包装过 / 特殊流）→ 退化为容错包装
+        class _SafeStream:
+            def __init__(self, s):
+                self._s = s
+
+            def write(self, data):
+                try:
+                    self._s.write(data)
+                except Exception:
+                    try:
+                        self._s.write(data.encode("utf-8", "replace").decode("utf-8", "replace"))
+                    except Exception:
+                        pass
+
+            def flush(self):
+                try:
+                    self._s.flush()
+                except Exception:
+                    pass
+
+            def isatty(self):
+                return False
+
+        _safe_out = _SafeStream(_raw_out)
+
+    try:
+        _sh = logging.StreamHandler(_safe_out)
+        _sh.setFormatter(_fmt)
+        logger.addHandler(_sh)
+    except Exception:
+        pass
 logger.propagate = False
 
 
@@ -218,28 +278,195 @@ ANTI_THROTTLE_ARGS = [
 ]
 
 
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# 让页面认为自己始终"可见"（拦截 Page Visibility API）
+VISIBILITY_SCRIPT = """
+Object.defineProperty(document, 'visibilityState', {get: () => 'visible', configurable: true});
+Object.defineProperty(document, 'hidden', {get: () => false, configurable: true});
+document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+window.addEventListener('blur', e => {}, true);
+window.addEventListener('focus', e => {}, true);
+"""
+
+
+def profile_dir():
+    """浏览器用户数据目录（绝对路径）。"""
+    return (BASE_DIR / BR["user_data_dir"]).resolve()
+
+
+def clean_profile_locks(ud=None):
+    """删除 Chromium 的单实例锁文件。
+
+    程序被强杀（任务管理器结束进程 / 断电 / 崩溃）后，user_data_dir 里会残留
+    SingletonLock 等锁文件。下次启动时浏览器会误判"已有实例在运行"，把命令
+    转交给那个不存在的实例后**立即自行退出**，playwright 于是报
+    TargetClosedError: Target page, context or browser has been closed。
+    """
+    ud = Path(ud or profile_dir())
+    removed = []
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        try:
+            for f in ud.glob(name):
+                try:
+                    f.unlink()
+                    removed.append(f.name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return removed
+
+
+def find_browser_pids_using(ud=None):
+    """找出命令行中使用了指定配置目录的 Edge/Chrome 进程 PID。
+
+    仅匹配**我们自己的配置目录**，不会误伤用户正在使用的浏览器。
+    """
+    ud = Path(ud or profile_dir())
+    key = str(ud).lower().replace("'", "''")
+    ps = (
+        "$k = '" + key + "';"
+        "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'\" "
+        "-ErrorAction SilentlyContinue | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($k) } | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    pids = []
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, timeout=25, creationflags=_NO_WINDOW,
+        )
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.append(int(line))
+    except Exception:
+        pass
+    return pids
+
+
+def kill_pids(pids):
+    """结束进程树（/T 连带子进程），避免残留浏览器锁住配置目录。"""
+    pids = [p for p in pids if isinstance(p, int) and p > 0]
+    if not pids:
+        return
+    cmd = ["taskkill", "/F", "/T"]
+    for p in pids:
+        cmd += ["/PID", str(p)]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=40, creationflags=_NO_WINDOW)
+    except Exception:
+        # 批量失败则逐个来
+        for p in pids:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p)],
+                               capture_output=True, timeout=20, creationflags=_NO_WINDOW)
+            except Exception:
+                pass
+
+
+def recover_profile(ud=None):
+    """清锁 + 结束仍占用该配置目录的残留浏览器进程。"""
+    ud = Path(ud or profile_dir())
+    locks = clean_profile_locks(ud)
+    if locks:
+        log(f"  已清理残留锁文件: {', '.join(locks)}")
+    pids = find_browser_pids_using(ud)
+    if pids:
+        log(f"  发现 {len(pids)} 个残留浏览器进程占用该配置，正在结束 …")
+        kill_pids(pids)
+        time.sleep(2)
+    return bool(locks or pids)
+
+
+def _attach_visibility_script(ctx):
+    try:
+        ctx.add_init_script(VISIBILITY_SCRIPT)
+    except Exception:
+        pass
+
+
 def launch_browser(p):
-    kwargs = dict(
-        user_data_dir=str(BASE_DIR / BR["user_data_dir"]),
+    """启动浏览器。带"自愈重试"：
+
+    实测飞书/Edge 环境下浏览器启动失败（TargetClosedError）最常见的原因，
+    是配置目录被上一次残留的浏览器进程占用（程序被强杀、点了停止又有残留、
+    或 Edge 正在后台自动更新）。这类故障是**瞬时**的，清掉锁 + 结束残留进程
+    后重试即可成功，不该让用户看到崩溃。
+
+    依次尝试：① 抗节流参数 → ② 最小参数 → ③ 完全默认参数
+    """
+    ud = profile_dir()
+    try:
+        ud.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    base = dict(
+        user_data_dir=str(ud),
         headless=BR["headless"],
         slow_mo=BR["slow_mo"],
         viewport={"width": BR["viewport_width"], "height": BR["viewport_height"]},
-        args=ANTI_THROTTLE_ARGS,
     )
     if BR.get("channel"):
-        kwargs["channel"] = BR["channel"]
-    ctx = p.chromium.launch_persistent_context(**kwargs)
-    # 让页面认为自己始终"可见"（拦截 Page Visibility API）
-    ctx.add_init_script(
-        """
-        Object.defineProperty(document, 'visibilityState', {get: () => 'visible', configurable: true});
-        Object.defineProperty(document, 'hidden', {get: () => false, configurable: true});
-        document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
-        window.addEventListener('blur', e => {}, true);
-        window.addEventListener('focus', e => {}, true);
-        """
-    )
-    return ctx
+        base["channel"] = BR["channel"]
+
+    # (说明, 附加参数, 本尝试前是否先自愈, 重试前等待秒数)
+    # 注意：自愈成功后要**先用原来的抗节流参数重试**，只有确实起不来才降级，
+    # 否则会白白丢掉"抗浏览器遮挡"这个关键能力。
+    # 中间穿插的等待，是为了扛住 Edge 后台自动更新之类的瞬时故障。
+    attempts = [
+        ("抗节流参数", ANTI_THROTTLE_ARGS, False, 0),
+        ("抗节流参数", ANTI_THROTTLE_ARGS, True, 2),
+        ("抗节流参数", ANTI_THROTTLE_ARGS, True, 10),
+        ("最小参数", ["--disable-blink-features=AutomationControlled"], False, 2),
+        ("默认参数", None, False, 10),
+    ]
+
+    # 启动前的信息性体检：只在发现"上次浏览器可能没退干净"的迹象时才做
+    # 昂贵的进程扫描（否则每次启动白白多花几秒）。
+    try:
+        if any(ud.glob("Singleton*")) or (ud / "lockfile").exists():
+            leftovers = find_browser_pids_using(ud)
+            if leftovers:
+                log(f"  提示：检测到 {len(leftovers)} 个残留浏览器进程占用该配置，"
+                    f"若启动失败将自动清理", "warning")
+    except Exception:
+        pass
+
+    last_err = None
+    t_start = time.time()
+    for idx, (label, extra_args, do_recover, delay) in enumerate(attempts, 1):
+        if delay:
+            log(f"  等待 {delay}s 后重试（{idx}/{len(attempts)}）…", "warning")
+            time.sleep(delay)
+        if do_recover:
+            log(f"  正在自愈后重试（{idx}/{len(attempts)}）…", "warning")
+            recover_profile(ud)
+
+        kw = dict(base)
+        if extra_args:
+            kw["args"] = extra_args
+
+        try:
+            ctx = p.chromium.launch_persistent_context(**kw)
+            if idx > 1:
+                log(f"  浏览器已启动（第 {idx} 次尝试，{label}）")
+            else:
+                log(f"  浏览器已就绪（{time.time() - t_start:.1f}s）")
+            _attach_visibility_script(ctx)
+            return ctx
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+            last_err = e
+            if not is_lost_error(e):
+                # 不是"启动即退出"类的问题（如配置写错），直接抛
+                raise
+            log(f"  浏览器启动失败（{label}）：{msg[:110]}", "warning")
+
+    raise RuntimeError(f"浏览器多次启动失败：{str(last_err).splitlines()[0][:200]}")
 
 
 def wait_for_chat_list(page, timeout=90):
@@ -621,6 +848,7 @@ def main():
 
     if not LLM.get("api_key", "").strip():
         log("请先在 config.yaml 填入 llm.api_key！", "error")
+        _shutdown_logging()
         sys.exit(1)
 
     state = load_state()
@@ -641,7 +869,23 @@ def main():
 
     with sync_playwright() as p:
         log("启动浏览器 ...")
-        ctx = launch_browser(p)
+        try:
+            ctx = launch_browser(p)
+        except Exception as e:
+            log("浏览器启动失败。", "error")
+            log(f"  原因: {str(e).splitlines()[0][:180]}", "error")
+            log("", "error")
+            log("  请按顺序尝试：", "error")
+            log("   1) 关闭所有 Edge 窗口，再点「启动监控」重试", "error")
+            log("   2) 仍失败 → 删除程序目录下的 .browser_data 文件夹，"
+                "再启动（需重新扫码登录）", "error")
+            log("   3) 仍失败 → 重启电脑后重试", "error")
+            log("", "error")
+            log("  （提示：Edge 正在后台自动更新时也会出现此现象，等 1 分钟再试通常就好）",
+                "error")
+            _shutdown_logging()
+            sys.exit(2)
+
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(FS["base_url"], wait_until="domcontentloaded", timeout=60000)
 
@@ -659,6 +903,7 @@ def main():
         if not wait_for_chat_list(page):
             log("会话列表加载失败", "error")
             ctx.close()
+            _shutdown_logging()
             sys.exit(1)
 
         target = FS["target_chat_name"]
@@ -666,6 +911,7 @@ def main():
         if not open_target_chat(page, target):
             log("无法进入目标会话", "error")
             ctx.close()
+            _shutdown_logging()
             sys.exit(1)
 
         log(f"就绪。轮询 {POLL['interval']}s（不滚动，只读最新消息）")
@@ -771,7 +1017,16 @@ def main():
                             time.sleep(interval)
                             continue
 
-                        log(f"  答案: {answer.replace(chr(10), ' / ')[:120]}")
+                        # 多行回复（如代码题）按行打印，便于在日志里核对格式
+                        if "\n" in answer:
+                            lines_ = answer.splitlines()
+                            log(f"  答案（{len(lines_)} 行，{len(answer)} 字符）:")
+                            for ln in lines_[:14]:
+                                log(f"    | {ln}")
+                            if len(lines_) > 14:
+                                log(f"    | ...（共 {len(lines_)} 行）")
+                        else:
+                            log(f"  答案: {answer[:120]}")
 
                         fp = question_fingerprint(trigger["text"])
                         fp_s = fp_to_str(fp)
@@ -803,6 +1058,9 @@ def main():
                             "question": (body or "")[:200],
                             "trigger": clean_text(trigger["text"])[:200],
                             "answer": answer[:200],
+                            # 完整回复（含多行代码），便于事后核对格式
+                            "answer_full": answer[:3000],
+                            "lines": len(answer.splitlines()),
                         })
                         STATS_FILE.write_text(
                             json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -831,9 +1089,48 @@ def main():
             time.sleep(interval + random.uniform(0, jitter))
 
         log("收到停止信号，关闭 ...")
-        ctx.close()
+        try:
+            ctx.close()
+        except Exception:
+            pass
         log("已退出。")
+        _shutdown_logging()
+
+
+def _shutdown_logging():
+    """
+    退出前刷写并关闭日志 handler。
+
+    Windows 上若不解绑，解释器清理阶段仍可能有日志写入，
+    而此时文件流已被关闭 —— 会打印 "--- Logging error ---"。
+    """
+    try:
+        for h in list(logger.handlers):
+            try:
+                h.flush()
+            except Exception:
+                pass
+            try:
+                h.close()
+            except Exception:
+                pass
+            logger.removeHandler(h)
+
+        # 同时清理根 logger 上可能存在的 handler，避免残留写入
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            try:
+                h.flush()
+                h.close()
+            except Exception:
+                pass
+            root.removeHandler(h)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _shutdown_logging()

@@ -19,6 +19,8 @@
 - **严格只发一次**：基于消息计数校验，杜绝重复发送
 - **失联自愈**：页面异常时自动重载 / 重建会话
 - **内置自检工具**：发送链路、后台能力、失联恢复均可一键验证
+- **绿色免安装版**：打包好的 exe + 图形配置向导，不装 Python 也能用（Windows）
+- **作答风格可调**：代码题默认「极简、不写注释、一句说明」，改提示词即可调整
 
 ---
 
@@ -44,6 +46,9 @@ python -m venv .venv
 ---
 
 ## 🚀 快速开始
+
+> **不想装 Python？** Windows 用户可直接用打包好的绿色免安装版，
+> 见下方「[绿色免安装版](#-绿色免安装版windows)」。需要改代码或自行部署时才走下面的源码流程。
 
 ### 1. 配置
 
@@ -92,14 +97,51 @@ set LLM_API_KEY=sk-xxxxxxxx
 
 ---
 
+## 🖥️ 绿色免安装版（Windows）
+
+打包好的 `飞书自动回复助手-绿色版.zip`，**解压即用，无需安装 Python**。
+
+1. 解压得到 `飞书自动回复助手/` 目录（路径别太深，避免超长路径问题）
+2. 双击 `飞书自动回复助手.exe`
+3. 首次启动弹出**配置向导**：填飞书地址、会话名、大模型 API Key
+4. 点「保存并开始」，浏览器自动拉起，**扫码登录一次**即可长期使用
+
+**几个容易踩的点**
+
+| 现象 | 说明 |
+|---|---|
+| 改了配置/Prompt 没反应 | 程序读的是 **exe 同目录**下的 `config.yaml`，改别处的无效；且**改完必须重启程序** |
+| 想重新配置 | 删掉同目录 `config.yaml`，重启 exe 会再弹向导 |
+| 双击没反应 | 看同目录 `launcher_error.log`（窗口程序没有控制台，错误都写这里） |
+| 启动报浏览器相关错误 | 多为配置目录被残留浏览器占用，程序会自动重试；见「常见问题」 |
+| 运行日志 | 同目录 `auto_reply.log`（历史）/ `live.log`（实时） |
+
+### 自行重新打包
+
+```bash
+# 需要带 tkinter 的 Python 3.8
+# （playwright 1.48 是最后支持 3.8 的版本，故开发环境锁定 3.8）
+python -m PyInstaller build.spec --noconfirm --distpath dist --workpath build/wk
+
+# 压缩：必须 cd 到 dist 再压缩，否则 zip 顶层会多一层 dist/
+cd dist && zip -r ../飞书自动回复助手-绿色版.zip 飞书自动回复助手
+```
+
+> **打包后一定要 `ls dist/` 核对产物**：只看日志容易被过滤掉失败信息（退出码仍是 0）。
+
+---
+
 ## 🧰 内置工具
 
 | 脚本 | 用途 |
 |---|---|
 | `step1_check_login.py` | 环境验证：登录 → 定位会话 → 读消息 |
 | `test_send.py` | 发送链路自检（不发送真实消息） |
+| `test_multiline.py` | 多行 / 代码块输入能力自检（不发送） |
 | `test_background.py` | 后台 / 遮挡环境读写能力自检 |
 | `test_occlusion.py` | 页面失联后的自动恢复自检 |
+| `test_code_style.py` | 代码题作答风格自检（只调模型，不启浏览器，几秒出结果） |
+| `sync_prompt.py` | 把最新提示词同步到各处 `config.yaml`（改 prompt 后必用） |
 | `diag_dom.py` | 对比 DOM 顺序与真实时间顺序，排查时序问题 |
 | `diag_page.py` | 打印页面实况（URL / 可见性 / 消息列表） |
 
@@ -108,10 +150,13 @@ set LLM_API_KEY=sk-xxxxxxxx
 ## 🏗️ 架构
 
 ```
-step2_auto_reply.py   主程序（轮询 → 选题 → 生成 → 发送 → 状态管理）
-  ├── settings.py       配置加载（环境变量 > config.yaml > example）
-  ├── denoise.py        去噪 / 选题 / 上下文压缩（核心逻辑）
-  └── fetch_history.py  历史抓取（滚动累积）
+launcher.py             图形界面（打包版入口）：配置向导 → 拉起子进程 → 实时日志
+  └── runtime.py          路径解析（源码运行 / 打包运行两种形态）
+
+step2_auto_reply.py     主程序（轮询 → 选题 → 生成 → 发送 → 状态管理）
+  ├── settings.py         配置加载（环境变量 > config.yaml > example）
+  ├── denoise.py          去噪 / 选题 / 上下文压缩（核心逻辑）
+  └── fetch_history.py    历史抓取（滚动累积）
 ```
 
 ### 核心机制
@@ -181,6 +226,19 @@ cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", ...})  # 
 且**成功判据是"消息条数 +1"，而不是"输入框是否为空"**
 （后者会因富文本残留而误判，导致重复发送）。
 
+**6. 多行内容（代码题）**
+
+代码题回复是多行带缩进的文本。飞书输入框是 `white-space: break-spaces`，
+所以用同一个 CDP `Input.insertText` 传带 `\n` 的文本即可 ——
+换行会变成多个 `<div class="ace-line">` 段落，**缩进完整保留**，一次 Enter 全部发出。
+
+```python
+cdp.send("Input.insertText", {"text": "line1\n    indented\nline3"})
+```
+
+> 排查提示：Lark 会给每行末尾加一个 `\u200b`（零宽空格）锚点，真人手打多行也一样。
+> **比对文本前必须剔除它**，否则会把"完全一致"误判成不一致。
+
 ---
 
 ## ⚙️ 配置项
@@ -237,34 +295,77 @@ taskkill /F /IM msedge.exe        # Windows
 `step2_auto_reply.py` 里的选择器（关键选择器：`.list_items`、
 `.js-message-item`、`.message-not-self`、`[contenteditable="true"]`）。
 
+**Q：想让代码题的回答更简 / 更详细，怎么改？**
+
+改 `system_prompt` 里的 `【代码题】` 段。默认口径是：**代码里一行注释都不写**，
+不写异常处理 / 参数校验 / 辅助函数 / `main` 示例，代码块后**只跟一句**说明关键行作用。
+
+改完用离线自检确认效果（只调模型，不启浏览器，几秒出结果）：
+
+```bash
+.venv\Scripts\python.exe test_code_style.py
+```
+
+> 注意：机器人对代码题明确要求「说明关键行的作用」，**只回代码或只回字母会被判无效作答**，
+> 所以那句说明不能省，只能压缩。
+
+**Q：改了提示词，为什么没生效？**
+
+程序首次配置后只会读**自己目录**下的 `config.yaml`，**不再回头读 `config.example.yaml`**；
+打包版读的是 **exe 同目录**。用同步工具处理：
+
+```bash
+python sync_prompt.py            # 预览要改哪些文件
+python sync_prompt.py --apply    # 实际写入（自动 .bak 备份）
+```
+
+它对待两类文件不同：模板类整文件复制（保住注释），你已生成的 `config.yaml`
+只替换提示词（**保住 api_key 等设置**）。改完**必须重启程序**才生效。
+
+**Q：代码题是多行回复，会被压成一行或丢缩进吗？**
+
+不会。实测 CDP 输入层对 `\n` 换行与缩进 **100% 保留**（输入框 `white-space: break-spaces`），
+` ``` ` 也不会触发飞书自动转代码块。可用 `test_multiline.py` 自检（**不会真的发送**）。
+
 ---
 
 ## 📁 目录结构
 
 ```
 feishu-auto-reply/
-├── LICENSE               ← MIT 开源协议
-├── config.example.yaml   ← 配置模板（复制为 config.yaml 使用）
+├── README.md
+├── LICENSE                     ← MIT 开源协议
 ├── requirements.txt
-├── settings.py           ← 配置加载（环境变量 > config.yaml > example）
-├── denoise.py            ← 去噪 / 选题 / 上下文压缩
-├── step2_auto_reply.py   ← 主程序
-├── fetch_history.py      ← 历史抓取
-├── step1_check_login.py  ← 环境验证
-├── test_send.py          ← 发送链路自检
-├── test_background.py    ← 后台能力自检
-├── test_occlusion.py     ← 失联恢复自检
-├── diag_dom.py           ← 时序诊断
-├── diag_page.py          ← 页面实况诊断
-└── README.md
+├── 使用说明.txt                 ← 面向非技术用户的上手说明
+│
+├── config.example.yaml         ← 配置模板（复制为 config.yaml 使用）
+├── runtime.py                  ← 路径解析（源码运行 / 打包运行两种形态）
+├── settings.py                 ← 配置加载（环境变量 > config.yaml > example）
+├── denoise.py                  ← 去噪 / 选题 / 上下文压缩
+├── step2_auto_reply.py         ← 主程序（轮询 → 选题 → 生成 → 发送）
+├── fetch_history.py            ← 历史抓取
+├── launcher.py                 ← 图形界面：配置向导 + 启停 + 实时日志
+├── build.spec                  ← PyInstaller 打包配置
+│
+├── step1_check_login.py        ← 环境验证
+├── test_send.py                ← 发送链路自检
+├── test_multiline.py           ← 多行 / 代码块输入自检
+├── test_background.py          ← 后台能力自检
+├── test_occlusion.py           ← 失联恢复自检
+├── test_code_style.py          ← 代码题作答风格自检
+├── sync_prompt.py              ← 提示词同步工具
+├── diag_dom.py                 ← 时序诊断
+└── diag_page.py                ← 页面实况诊断
 
 运行时自动生成（已 gitignore）：
-├── config.yaml           ← 你的真实配置
-├── .browser_data/        ← 登录态（勿提交）
-├── history.json          ← 会话历史（勿提交）
-├── answered.json         ← 已答记录
-├── reply_stats.json      ← 问答记录
-└── *.log
+├── config.yaml                 ← 你的真实配置
+├── .browser_data/              ← 登录态（勿提交）
+├── history.json                ← 会话历史（勿提交）
+├── answered.json               ← 已答记录
+├── reply_stats.json            ← 问答记录
+├── auto_reply.log / live.log   ← 运行日志
+├── launcher_error.log          ← 图形界面错误日志（打包版）
+└── .launcher.pid               ← 单实例保护
 ```
 
 ---
