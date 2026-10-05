@@ -11,6 +11,7 @@
   （或改用环境变量，避免密钥落盘 —— 见 README）
 
 支持的环境变量：
+  FEISHU_DATA_DIR      数据目录（配置/登录态/日志存放位置）
   FEISHU_BASE_URL      飞书网页版地址
   FEISHU_TARGET_CHAT   目标会话名
   LLM_API_KEY          大模型 API Key
@@ -19,17 +20,16 @@
 """
 
 import os
-from pathlib import Path
 
 import yaml
 
-BASE_DIR = Path(__file__).parent
+from runtime import DATA_DIR, config_path
+
+BASE_DIR = DATA_DIR
 
 
 def load_config():
-    path = BASE_DIR / "config.yaml"
-    if not path.exists():
-        path = BASE_DIR / "config.example.yaml"
+    path = config_path()
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
@@ -48,3 +48,4 @@ def load_config():
         llm["model"] = os.environ["LLM_MODEL"]
 
     return cfg
+

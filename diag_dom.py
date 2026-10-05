@@ -1,7 +1,6 @@
 """DOM 顺序 vs id 排序 对比诊断"""
 import sys, time
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, '.')
 from playwright.sync_api import sync_playwright
 import step2_auto_reply as S
 from denoise import clean_text, snowflake_ts

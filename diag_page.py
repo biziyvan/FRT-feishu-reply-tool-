@@ -20,7 +20,6 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).parent
-sys.path.insert(0, str(BASE_DIR))
 from settings import load_config
 CFG = load_config()
 FS = CFG["feishu"]

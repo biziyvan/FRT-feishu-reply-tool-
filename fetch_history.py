@@ -22,9 +22,10 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from denoise import clean_text, classify, denoise, sort_by_time
+from runtime import DATA_DIR
 
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = DATA_DIR
 HISTORY_FILE = BASE_DIR / "history.json"
 RAW_FILE = BASE_DIR / "history_raw.json"
 
@@ -148,8 +149,7 @@ def main():
 
         ctx.close()
 
-    # 按雪花 ID 时间分量排序，还原真实时间序（DOM 顺序不可靠）
-    msgs = sort_by_time(acc.values())
+    msgs = sorted(acc.values(), key=lambda m: int(m["id"]) if m["id"].isdigit() else 0)
     log(f"\n共抓取 {len(msgs)} 条原始消息")
 
     # 保存原始

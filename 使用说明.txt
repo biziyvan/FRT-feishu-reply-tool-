@@ -95,8 +95,16 @@
   Q：回复重复了 / 答非所问？
   A：先看日志。若持续异常，点「停止」再「启动」重启一次。
 
+  Q：写代码的题会怎么回答？
+  A：给极简的核心代码，代码里不写注释，也不写异常处理、参数校验、
+     多余函数这类"太完善"的东西，代码块后面用一句话说明关键行的作用。
+     （机器人对代码题要求"说明关键行的作用"，这句不能省。）
+     想让回答更详细或更简，可编辑同目录 config.yaml 里
+     llm.system_prompt 的【代码题】段，改完重启程序生效。
+
   Q：想换模型或改配置？
   A：点「修改配置」重新填写，或直接编辑同目录下的 config.yaml。
+     ★ 注意：编辑 config.yaml 后必须重启程序才会生效。
 
   Q：程序卡住 / 浏览器被锁住？
   A：按 Ctrl+Shift+Esc 打开任务管理器，
@@ -116,7 +124,8 @@
   config.yaml            ← 你的配置（首次配置后自动生成，含 API Key）
   config.example.yaml    ← 配置模板
   .browser_data\         ← 浏览器登录态（扫码后生成）
-  auto_reply.log         ← 运行日志
+  auto_reply.log         ← 运行日志（历史）
+  live.log               ← 实时日志（与界面下方显示的内容一致）
   launcher_error.log     ← 界面错误记录（排查问题用，正常时不存在）
   answered.json          ← 已答题目记录
   reply_stats.json       ← 问答统计

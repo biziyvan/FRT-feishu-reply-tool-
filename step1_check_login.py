@@ -25,7 +25,7 @@ import yaml
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = DATA_DIR
 LOG_FILE = BASE_DIR / "step1.log"
 SHOT_DIR = BASE_DIR / "debug_shots"
 SHOT_DIR.mkdir(exist_ok=True)
@@ -49,6 +49,7 @@ def log(msg, level="info"):
 
 # ---------------- 配置 ----------------
 from settings import load_config  # noqa: E402
+from runtime import DATA_DIR  # noqa: E402
 
 CFG = load_config()
 FS = CFG["feishu"]
