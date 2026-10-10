@@ -157,6 +157,7 @@ cd dist && zip -r ../飞书自动回复助手-绿色版.zip 飞书自动回复�
 | `test_multiline.py` | 多行 / 代码块输入能力自检（不发送） |
 | `test_background.py` | 后台 / 遮挡环境读写能力自检 |
 | `test_occlusion.py` | 页面失联后的自动恢复自检 |
+| `test_minimize.py` | 窗口最小化下运行能力自检（真正调 `SW_MINIMIZE`，验证定时器/DOM 不退化） |
 | `test_code_style.py` | 代码题作答风格自检（只调模型，不启浏览器，几秒出结果） |
 | `sync_prompt.py` | 把最新提示词同步到各处 `config.yaml`（改 prompt 后必用） |
 | `diag_dom.py` | 对比 DOM 顺序与真实时间顺序，排查时序问题 |
