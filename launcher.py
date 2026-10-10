@@ -286,19 +286,47 @@ def _release_single_instance():
 # ============================================================
 # 配置向导（首次运行）
 # ============================================================
-class ConfigWizard(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title(f"{APP_TITLE} · 首次配置")
+class ConfigWizard(tk.Toplevel):
+    """配置向导。
+
+    必须做成 Toplevel，不能用第二个 tk.Tk()：
+    同进程里再建一个 Tk 会把 tkinter._default_root 抢走，
+    向导一关，主窗口的控件就变成 "invalid command name"。
+    调用方负责提供 master（首次配置时先建一个隐藏根窗口）。
+    """
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title(f"{APP_TITLE} · 配置向导")
         self.geometry("640x620")
         self.resizable(False, False)
         self.result = False
         install_exception_hook(self)
         self._build()
-        # 置顶显示，避免对话框被其它窗口盖住
+        # 模态 + 置顶，避免对话框被其它窗口盖住
+        try:
+            self.transient(master)
+            self.grab_set()
+        except Exception:
+            pass
         self.lift()
-        self.attributes("-topmost", True)
-        self.after(600, lambda: self.attributes("-topmost", False))
+        try:
+            self.attributes("-topmost", True)
+            self.after(600, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _release(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+    def _cancel(self):
+        self.result = False
+        self._release()
+        self.destroy()
 
     def _build(self):
         pad = {"padx": 18, "pady": 8}
@@ -385,6 +413,37 @@ class ConfigWizard(tk.Tk):
         )
         self.btn_save.pack(side="right")
 
+        # 已有配置则回填，避免"打开向导 → 直接保存"把原设置冲掉
+        self._prefill()
+
+    def _prefill(self):
+        """用现有 config.yaml 的值回填各输入框。
+
+        没有这一步时，向导显示的是硬编码默认值（飞书地址是占位符），
+        用户点一次"保存"就会把真实的 base_url / 密钥 覆盖掉。
+        """
+        try:
+            if not CONFIG_FILE.exists():
+                return
+            cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return
+        if not isinstance(cfg, dict):
+            return
+        fs = cfg.get("feishu") or {}
+        llm = cfg.get("llm") or {}
+
+        def fill(entry, value):
+            if value:
+                entry.delete(0, "end")
+                entry.insert(0, str(value))
+
+        fill(self.e_url, fs.get("base_url"))
+        fill(self.e_chat, fs.get("target_chat_name"))
+        fill(self.e_key, llm.get("api_key"))
+        fill(self.e_base, llm.get("base_url"))
+        fill(self.e_model, llm.get("model"))
+
     def _toggle_adv(self):
         if self.adv_open:
             self.adv_frame.pack_forget()
@@ -406,6 +465,9 @@ class ConfigWizard(tk.Tk):
     def _validate(self, d):
         if not d["url"] or "feishu.cn" not in d["url"]:
             return "飞书地址看起来不对，应形如 https://xxx.feishu.cn/next/messenger/"
+        if "你的租户" in d["url"] or "YOUR_TENANT" in d["url"].upper():
+            return ("飞书地址还是占位符，请改成你自己的地址"
+                    "（形如 https://xxx.feishu.cn/next/messenger/）")
         if not d["url"].startswith("http"):
             return "飞书地址需要以 http:// 或 https:// 开头"
         if not d["chat"]:
@@ -462,9 +524,16 @@ class ConfigWizard(tk.Tk):
                 messagebox.showwarning("请检查", err, parent=self)
                 return
 
-            # 读模板作为基底，保留其它默认项（含 system_prompt 等）
-            # 注意：这里必须用 yaml 解析，模板本身就是 YAML 格式。
-            cfg = load_base_config()
+            # 基底优先用现有 config.yaml（保住用户其它设置与 prompt），
+            # 没有或损坏时才退回模板。
+            cfg = None
+            try:
+                if CONFIG_FILE.exists():
+                    cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                cfg = None
+            if not isinstance(cfg, dict):
+                cfg = load_base_config()
 
             # 防御：模板若被破坏成非 dict，退回内嵌默认
             if not isinstance(cfg, dict):
@@ -505,6 +574,7 @@ class ConfigWizard(tk.Tk):
                 )
             except Exception:
                 pass
+            self._release()
             self.destroy()
         except Exception:
             # 任何意外都要让用户看见，绝不静默失败
@@ -620,7 +690,10 @@ class MainWindow(tk.Tk):
                 fg="#333",
             )
         except Exception as e:
-            self.lbl_cfg.config(text=f"配置读取失败：{e}", fg="#c0392b")
+            try:
+                self.lbl_cfg.config(text=f"配置读取失败：{e}", fg="#c0392b")
+            except Exception:
+                pass
 
     # ---------- 日志 ----------
     def _log(self, line):
@@ -834,11 +907,11 @@ class MainWindow(tk.Tk):
 
     # ---------- 其它按钮 ----------
     def edit_config(self):
-        w = ConfigWizard()
-        w.mainloop()
-        self._load_summary()
+        w = ConfigWizard(self)
+        self.wait_window(w)
         if w.result:
             self._log("配置已更新。")
+        self._load_summary()
 
     def open_data(self):
         try:
@@ -917,9 +990,17 @@ def main():
             pass
 
         if not CONFIG_FILE.exists():
-            wiz = ConfigWizard()
-            wiz.mainloop()
-            if not wiz.result:
+            # 首次配置：先建一个隐藏根窗口承载向导（不能用第二个 Tk 当向导）
+            root = tk.Tk()
+            root.withdraw()
+            wiz = ConfigWizard(root)
+            wiz.wait_window()
+            ok = wiz.result
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            if not ok:
                 return
 
         win = MainWindow()

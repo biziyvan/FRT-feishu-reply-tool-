@@ -181,10 +181,17 @@ def build_context(messages, max_chars=3000, keep_questions=5, current=None):
         mtype = m.get("type") or classify(t)
 
         if mtype == TYPE_FEEDBACK:
-            # 保留"答对/答错"和解析的前 220 字
-            line = t.replace("\n", " ")
-            if len(line) > 220:
-                line = line[:220] + "…"
+            # 反馈 = 判定 + 解析（可截断） + 可能夹带的新题（**必须完整保留选项**）
+            head = t.split("掌握度")[0]
+            head = re.sub(r"\s+", " ", head).strip()
+            if len(head) > 160:
+                head = head[:160] + "…"
+            _q, _qb = extract_pending_question(t)
+            if _qb:
+                tag = f"第 {_q} 题" if _q is not None else "新题"
+                line = f"{head}\n【{tag}】{_qb}"
+            else:
+                line = head
             picked.append(("机器人", line, m["id"]))
         else:
             picked.append(("机器人" if m["is_from_other"] else "我", t, m["id"]))
@@ -257,11 +264,14 @@ def sort_by_time(messages):
 # 反馈卡片尾部夹带的下一题形如：
 #   掌握度: 15% / 第 3 题 / 请用自己的话说说「以太坊开发环境」…  ⚠️ 需切换课程…
 _QNUM_RE = re.compile(r"第\s*(\d+)\s*题")
-_TRAILING_Q_RE = re.compile(
-    r"掌握度[:：]\s*\d+\s*%\s*\n+\s*第\s*\d+\s*题\s*\n+\s*(.+?)(?:\n.*?(?:需切换课程|掌握度|$))",
-    re.S,
-)
+# 以"掌握度: N%"为锚，其后第一个"第 N 题"才是真正要答的新题
+# （解析文字里可能也提到题号，所以必须从锚点之后再找）
+_TRAILING_Q_RE = re.compile(r"掌握度[:：]\s*\d+\s*%\s*(.*)$", re.S)
 _ASK_RE = re.compile(r"第\s*(\d+)\s*题")
+# 题目尾部开始的提示行：这些之后的内容一律不要
+_TAIL_STOP_RE = re.compile(r"💡\s*直接回复|⚠️\s*需切换课程|🔍")
+# 选项行（A. / B、 / C) / D． 等形式）
+_OPTION_LINE_RE = re.compile(r"^\s*[A-D][\.、．)）]\s*")
 # 题干里需要去掉的前后缀碎片
 _BODY_NOISE = [
     r"^[（(]\s*掌握度\s*\d+\s*%?\s*[）)]\s*",
@@ -273,13 +283,19 @@ _BODY_NOISE = [
 
 
 def _strip_body(body):
-    """清理题干里的 UI 残留。"""
+    """清理题干里的 UI 残留。**保留换行结构**（选项必须分行才看得懂）。"""
     if not body:
         return body
+    body = body.strip()
     for pat in _BODY_NOISE:
         body = re.sub(pat, "", body)
-    body = re.sub(r"\s+", " ", body).strip()
-    return body or None
+    # 只压行内多余空白，不碰换行
+    body = re.sub(r"[ \t]+", " ", body)
+    # 选项前缀去重：卡片里是 "A. A. start.sh"，规范成 "A. start.sh"
+    body = re.sub(r"(?m)^([A-D])[\.、．)）]\s*\1[\.、．)）]\s*", r"\1. ", body)
+    # 折叠多余空行（保留单换行）
+    body = re.sub(r"\n\s*\n+", "\n", body)
+    return body.strip() or None
 
 
 def extract_pending_question(text):
@@ -298,19 +314,26 @@ def extract_pending_question(text):
     if "AI 自适应问答" in text or "AI自适应问答" in text:
         m = _ASK_RE.search(text)
         qnum = int(m.group(1)) if m else None
-        # 题干：题号行之后的内容
-        idx = text.find("题")
-        body = text[idx + 1:] if idx >= 0 else text
+        if m:
+            body = text[m.end():]
+        else:
+            idx = text.find("题")
+            body = text[idx + 1:] if idx >= 0 else text
         # 砍掉尾部的操作提示
-        body = re.split(r"💡\s*直接回复|⚠️\s*需切换课程", body)[0]
+        body = _TAIL_STOP_RE.split(body)[0]
         return qnum, _strip_body(body)
 
     if "学习反馈" in text:
+        # 以"掌握度: N%"为锚点，其后第一个"第 N 题"才是新题；
+        # 一直取到尾部提示为止 —— **这样题干与 A/B/C/D 选项都会保留**。
         m = _TRAILING_Q_RE.search(text)
         if m:
-            qnum_m = _QNUM_RE.search(text[m.start():m.end()])
-            qnum = int(qnum_m.group(1)) if qnum_m else None
-            return qnum, _strip_body(m.group(1))
+            rest = m.group(1)
+            qm = _QNUM_RE.search(rest)
+            if qm:
+                body = rest[qm.end():]
+                body = _TAIL_STOP_RE.split(body)[0]
+                return int(qm.group(1)), _strip_body(body)
 
     return None, None
 
@@ -329,9 +352,10 @@ def question_fingerprint(text):
     qnum, body = extract_pending_question(text)
     if not body:
         return None
-    core = re.sub(r"[\s\W]+", "", body)
-    # 去掉选项噪音（A. B. C. D. 的内容）后的主句
-    core = re.split(r"ABCD", core)[0] if len(core) > 20 else core
+    # 只取题干：剔除 A./B./C./D. 选项行，避免选项文字干扰指纹
+    stem_lines = [l for l in body.split("\n") if not _OPTION_LINE_RE.match(l)]
+    stem = " ".join(stem_lines).strip() or body
+    core = re.sub(r"[\s\W]+", "", stem)
     core = core[:40]
     if not core:
         return None

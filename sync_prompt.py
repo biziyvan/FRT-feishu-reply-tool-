@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 SRC_CONFIG = ROOT / "config.yaml"
 SRC_EXAMPLE = ROOT / "config.example.yaml"
 
-GREEN = ROOT / "飞书自动回复助手-绿色版" / "飞书自动回复助手"
+GREEN = ROOT / "飞书自动回复助手-绿色版"
 
 # 模板文件：整文件复制
 EXAMPLE_TARGETS = [
