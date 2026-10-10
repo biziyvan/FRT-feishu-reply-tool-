@@ -41,7 +41,7 @@ def main():
             user_data_dir=str(BASE_DIR / BR["user_data_dir"]),
             headless=False,
             channel=BR.get("channel"),
-            args=["--no-sandbox"],
+            args=["--no-sandbox", "--edge-skip-compat-layer-relaunch"],
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         log.info(f"页面 URL: {page.url}")

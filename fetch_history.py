@@ -80,7 +80,9 @@ def main():
             headless=BR["headless"],
             slow_mo=BR["slow_mo"],
             viewport={"width": BR["viewport_width"], "height": BR["viewport_height"]},
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            # Edge 155+ 必须带"跳过兼容层重启"，否则启动即秒退（TargetClosedError）
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                  "--edge-skip-compat-layer-relaunch"],
         )
         if BR.get("channel"):
             kwargs["channel"] = BR["channel"]

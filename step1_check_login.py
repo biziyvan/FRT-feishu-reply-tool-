@@ -69,6 +69,8 @@ def launch_browser(p):
         args=[
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
+            # Edge 155+ 必须带"跳过兼容层重启"，否则启动即秒退（TargetClosedError）
+            "--edge-skip-compat-layer-relaunch",
         ],
     )
     if BR.get("channel"):

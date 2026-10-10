@@ -277,6 +277,12 @@ ANTI_THROTTLE_ARGS = [
     "--disable-window-occlusion-tracking",
 ]
 
+# Edge 155+ 引入了"兼容层重启"：以自动化参数启动时，Edge 会先把自己重启一遍
+# 再接管，Playwright 刚连上就发现原进程已退出 → TargetClosedError
+# （表现为"启动即秒退"，退出码 0、无任何报错输出）。
+# 该开关让 Edge 跳过这次重启。仅 Edge 内核需要，其余 Chromium 会忽略未知开关。
+EDGE_COMPAT_ARGS = ["--edge-skip-compat-layer-relaunch"]
+
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -417,12 +423,17 @@ def launch_browser(p):
     # 注意：自愈成功后要**先用原来的抗节流参数重试**，只有确实起不来才降级，
     # 否则会白白丢掉"抗浏览器遮挡"这个关键能力。
     # 中间穿插的等待，是为了扛住 Edge 后台自动更新之类的瞬时故障。
+    # Edge 155+ 必须带"跳过兼容层重启"开关，否则每种参数组合都会秒退，
+    # 因此把它并进**每一条**尝试路径（含降级的最小/默认参数），不能只在抗节流里。
+    _chan = str(BR.get("channel") or "")
+    compat = list(EDGE_COMPAT_ARGS) if _chan.startswith("msedge") else []
+
     attempts = [
-        ("抗节流参数", ANTI_THROTTLE_ARGS, False, 0),
-        ("抗节流参数", ANTI_THROTTLE_ARGS, True, 2),
-        ("抗节流参数", ANTI_THROTTLE_ARGS, True, 10),
-        ("最小参数", ["--disable-blink-features=AutomationControlled"], False, 2),
-        ("默认参数", None, False, 10),
+        ("抗节流参数", ANTI_THROTTLE_ARGS + compat, False, 0),
+        ("抗节流参数", ANTI_THROTTLE_ARGS + compat, True, 2),
+        ("抗节流参数", ANTI_THROTTLE_ARGS + compat, True, 10),
+        ("最小参数", ["--disable-blink-features=AutomationControlled"] + compat, False, 2),
+        ("默认参数", compat or None, False, 10),
     ]
 
     # 启动前的信息性体检：只在发现"上次浏览器可能没退干净"的迹象时才做

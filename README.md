@@ -26,7 +26,7 @@
 
 ## 📦 环境准备
 
-需要 Python 3.9+。
+需要 Python 3.10+（当前依赖 playwright 1.63，它要求 `Requires-Python: >=3.10`）。
 
 ```bash
 # 1. 创建虚拟环境
@@ -118,14 +118,31 @@ set LLM_API_KEY=sk-xxxxxxxx
 
 ### 自行重新打包
 
+打包环境请用 **python.org 官方安装版 Python 3.13**（自带 tkinter），
+这样 playwright 能跟上最新版本、不会被锁死在旧版：
+
 ```bash
-# 需要带 tkinter 的 Python 3.8
-# （playwright 1.48 是最后支持 3.8 的版本，故开发环境锁定 3.8）
+pip install playwright pyyaml requests pyinstaller   # 依赖一个都不能少
 python -m PyInstaller build.spec --noconfirm --distpath dist --workpath build/wk
 
 # 压缩：必须 cd 到 dist 再压缩，否则 zip 顶层会多一层 dist/
 cd dist && zip -r ../飞书自动回复助手-绿色版.zip 飞书自动回复助手
 ```
+
+> **三个必须记住的坑**
+>
+> 1. **别用"精简版 / 托管版"Python**：某些发行版编译时裁掉了 Tk（`Lib/tkinter` 是空的、
+>    没有 `_tkinter.pyd`），`import tkinter` 直接失败。先用 `py -0p` 枚举机器上所有
+>    Python、挨个测 tkinter，挑**带 Tk 且版本最新**的那个 —— 不要因为一个解释器缺 Tk
+>    就断定"整个版本都缺"（这个误判会把项目逼回老 Python，进而被老 playwright 锁死）。
+> 2. **依赖必须装齐**：`build.spec` 里 `collect_all(pkg)` 对缺失的包是 **`try/except pass`
+>    静默跳过**的，漏装不报错，只会让打出的 exe 一启动就 `ModuleNotFoundError`。
+> 3. **exe 与 `_internal/` 必须同版本配套**：跨 Python 版本升级时只能**整体替换**整个
+>    目录，单独替换 exe 会启动即死（新 exe 找不到自己需要的 `pythonXXX.dll`）。
+>
+> **为什么强调用新版 Python**：打包会把 playwright **固化**进 exe，而用户机器上的浏览器
+> 是独立自动更新的。老 playwright 迟早跟不上新浏览器（例如 Edge 155 引入"兼容层重启"后，
+> playwright 1.48 启动即秒退）。用最新 Python ⇒ 用最新 playwright ⇒ 抗浏览器升级能力强。
 
 > **打包后一定要 `ls dist/` 核对产物**：只看日志容易被过滤掉失败信息（退出码仍是 0）。
 
@@ -144,6 +161,7 @@ cd dist && zip -r ../飞书自动回复助手-绿色版.zip 飞书自动回复�
 | `sync_prompt.py` | 把最新提示词同步到各处 `config.yaml`（改 prompt 后必用） |
 | `diag_dom.py` | 对比 DOM 顺序与真实时间顺序，排查时序问题 |
 | `diag_page.py` | 打印页面实况（URL / 可见性 / 消息列表） |
+| `diag_browser.py` | 浏览器启动分层诊断（环境 → 配置目录 → 占用进程 → 启动实测，直接给结论） |
 
 ---
 
